@@ -1,0 +1,4 @@
+./thttpd
+-C
+/usr/local/etc/thttpd.conf
+-D
