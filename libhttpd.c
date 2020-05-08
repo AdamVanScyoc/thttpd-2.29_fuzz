@@ -136,7 +136,7 @@ static int auth_check2( httpd_conn* hc, char* dirname  );
 #endif /* AUTH_FILE */
 static void send_dirredirect( httpd_conn* hc );
 static int hexit( char c );
-static void strdecode( char* to, char* from );
+void strdecode( char* to, char* from );
 #ifdef GENERATE_INDEXES
 static void strencode( char* to, int tosize, char* from );
 #endif /* GENERATE_INDEXES */
@@ -146,10 +146,10 @@ static int tilde_map_1( httpd_conn* hc );
 #ifdef TILDE_MAP_2
 static int tilde_map_2( httpd_conn* hc );
 #endif /* TILDE_MAP_2 */
-static int vhost_map( httpd_conn* hc );
-static char* expand_symlinks( char* path, char** restP, int no_symlink_check, int tildemapped );
-static char* bufgets( httpd_conn* hc );
-static void de_dotdot( char* file );
+int vhost_map( httpd_conn* hc );
+char* expand_symlinks( char* path, char** restP, int no_symlink_check, int tildemapped );
+char* bufgets( httpd_conn* hc );
+void de_dotdot( char* file );
 static void init_mime( void );
 static void figure_mime( httpd_conn* hc );
 #ifdef CGI_TIMELIMIT
@@ -1234,7 +1234,7 @@ hexit( char c )
 /* Copies and decodes a string.  It's ok for from and to to be the
 ** same string.
 */
-static void
+void
 strdecode( char* to, char* from )
     {
     for ( ; *from != '\0'; ++to, ++from )
@@ -1360,7 +1360,7 @@ tilde_map_2( httpd_conn* hc )
 
 
 /* Virtual host mapping. */
-static int
+int
 vhost_map( httpd_conn* hc )
     {
     httpd_sockaddr sa;
@@ -1452,7 +1452,7 @@ vhost_map( httpd_conn* hc )
 ** This is a fairly nice little routine.  It handles any size filenames
 ** without excessive mallocs.
 */
-static char*
+char*
 expand_symlinks( char* path, char** restP, int no_symlink_check, int tildemapped )
     {
     static char* checked;
@@ -1951,7 +1951,7 @@ httpd_got_request( httpd_conn* hc )
 
 
 int
-httpd_parse_request( httpd_conn* hc )
+httpd_parse_request( httpd_conn* hc, int * useragent_alloc )
     {
     char* buf;
     char* method_str;
@@ -2098,6 +2098,7 @@ httpd_parse_request( httpd_conn* hc )
 		}
 	    else if ( strncasecmp( buf, "User-Agent:", 11 ) == 0 )
 		{
+		*useragent_alloc = 1;
 		cp = &buf[11];
 		cp += strspn( cp, " \t" );
 		hc->useragent = cp;
@@ -2393,7 +2394,7 @@ httpd_parse_request( httpd_conn* hc )
     }
 
 
-static char*
+char*
 bufgets( httpd_conn* hc )
     {
     int i;
@@ -2412,14 +2413,14 @@ bufgets( httpd_conn* hc )
 		hc->read_buf[hc->checked_idx] = '\0';
 		++hc->checked_idx;
 		}
-	    return &(hc->read_buf[i]);
+	    return (char *)&(hc->read_buf[i]);
 	    }
 	}
     return (char*) 0;
     }
 
 
-static void
+void
 de_dotdot( char* file )
     {
     char* cp;

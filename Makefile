@@ -47,8 +47,12 @@ CGIBINDIR =	$(WEBDIR)/cgi-bin
 
 # You shouldn't need to edit anything below here.
 
+export ASAN_OPTIONS=detect_leaks=0
+
+#CC =		gcc
 CC =		afl-clang-fast
 CCOPT =		-O2
+#CCOPT =		-g 
 DEFS =		 -DHAVE__PROGNAME=1 -DHAVE_FCNTL_H=1 -DHAVE_GRP_H=1 -DHAVE_MEMORY_H=1 -DHAVE_PATHS_H=1 -DHAVE_POLL_H=1 -DHAVE_SYS_POLL_H=1 -DTIME_WITH_SYS_TIME=1 -DHAVE_DIRENT_H=1 -DHAVE_LIBCRYPT=1 -DHAVE_STRERROR=1 -DHAVE_WAITPID=1 -DHAVE_VSNPRINTF=1 -DHAVE_DAEMON=1 -DHAVE_SETSID=1 -DHAVE_GETADDRINFO=1 -DHAVE_GETNAMEINFO=1 -DHAVE_GAI_STRERROR=1 -DHAVE_SIGSET=1 -DHAVE_ATOLL=1 -DHAVE_UNISTD_H=1 -DHAVE_GETPAGESIZE=1 -DHAVE_MMAP=1 -DHAVE_SELECT=1 -DHAVE_POLL=1 -DHAVE_TM_GMTOFF=1 -DHAVE_INT64T=1 -DHAVE_SOCKLENT=1 
 INCLS =		-I.
 CFLAGS =	$(CCOPT) $(DEFS) $(INCLS)
@@ -63,24 +67,32 @@ INSTALL =	/usr/bin/install -c
 	@rm -f $@
 	$(CC) $(CFLAGS) -c $*.c
 
-SRC =		thttpd.c libhttpd.c fdwatch.c mmc.c timers.c match.c tdate_parse.c
+#SRC =		thttpd.c libhttpd.c fdwatch.c mmc.c timers.c match.c tdate_parse.c
+SRC =		libhttpd.c fdwatch.c mmc.c timers.c match.c tdate_parse.c parse_request.c
 
 OBJ =		$(SRC:.c=.o) 
 
 ALL =		thttpd
 
+PARSE_REQUEST =		parse_request
+
 GENHDR =	mime_encodings.h mime_types.h
 
-CLEANFILES =	$(ALL) $(OBJ) $(GENSRC) $(GENHDR)
+CLEANFILES =	$(ALL) $(OBJ) $(GENSRC) $(GENHDR) $(PARSE_REQUEST)
 
 SUBDIRS =	cgi-src extras
+
 
 all:		this subdirs
 this:		$(ALL)
 
 thttpd: $(OBJ)
 	@rm -f $@
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJ) $(LIBS) $(NETLIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o  $@ $(OBJ) $(LIBS) $(NETLIBS)
+
+parse_request:
+	#$(CC) $(CFLAGS) $(LDFLAGS) -o parse_request parse_request.c thttpd.o fdwatch.o mmc.o timers.o match.o tdate_parse.o $(LIBS) $(NETLIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o parse_request parse_request.c timers.o mmc.o tdate_parse.o match.o libhttpd.o  $(LIBS) $(NETLIBS)
 
 mime_encodings.h:	mime_encodings.txt
 	rm -f mime_encodings.h
@@ -164,7 +176,7 @@ tar:
 	  rm -rf $$name ; \
 	  gzip $$name.tar
 
-thttpd.o:	config.h version.h libhttpd.h fdwatch.h mmc.h timers.h match.h
+#thttpd.o:	config.h version.h libhttpd.h fdwatch.h mmc.h timers.h match.h
 libhttpd.o:	config.h version.h libhttpd.h mime_encodings.h mime_types.h \
 		mmc.h timers.h match.h tdate_parse.h
 fdwatch.o:	fdwatch.h

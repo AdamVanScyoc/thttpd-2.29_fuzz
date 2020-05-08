@@ -223,7 +223,7 @@ int httpd_got_request( httpd_conn* hc );
 **
 ** Returns -1 on error.
 */
-int httpd_parse_request( httpd_conn* hc );
+int httpd_parse_request( httpd_conn* hc, int * useragent_alloc);
 
 /* Starts sending data back to the client.  In some cases (directories,
 ** CGI programs), finishes sending by itself - in those cases, hc->file_fd

@@ -88,9 +88,6 @@ static char* user;
 static char* charset;
 static char* p3p;
 static int max_age;
-static FILE* fin;
-static char* filename1;
-static char* request;
 
 
 typedef struct {
@@ -354,667 +351,486 @@ re_open_logfile( void )
     }
 
 
-int
-main( int argc, char** argv )
-    {
-    char* cp;
-    struct passwd* pwd;
-    uid_t uid = 32767;
-    gid_t gid = 32767;
-    char cwd[MAXPATHLEN+1];
-    FILE* logfp;
-    int num_ready;
-    int cnum;
-    connecttab* c;
-    httpd_conn* hc;
-    httpd_sockaddr sa4;
-    httpd_sockaddr sa6;
-    int gotv4, gotv6;
-    struct timeval tv;
-
-//#ifdef KNOT_AFL_PERSISTENT_SHIM  /* For AFL persistent mode fuzzing shim  */
-
-	/* Initialize variables for fuzzing */
-	short sent_msg = 0;
-	char * recv_buff;
-	short recv_len = 0;
-	int sock = 0; 
-	struct sockaddr_in serv_addr; 
-	long lSize;
-	char *buffer;
-	int flags;
-	recv_buff = malloc(5120);
-
-//#endif // #ifdef KNOT_AFL_PERSISTENT_SHIM  
-
-    argv0 = argv[0];
-
-	/* TODO
-	if (getenv("AFL_PERSISTENT"))
-		printf("Detected AFL_PERSISTENT\n");
-	if (getenv("THTTPD_AFL_CMIN"))
-		printf("Detected THTTPD_AFL_CMIN\n");
-	exit(0);
-	*/
-
-    cp = strrchr( argv0, '/' );
-    if ( cp != (char*) 0 )
-	++cp;
-    else
-	cp = argv0;
-    openlog( cp, LOG_NDELAY|LOG_PID, LOG_FACILITY );
-
-    /* Handle command-line arguments. */
-    parse_args( argc, argv );
-
-    /* Read zone info now, in case we chroot(). */
-    tzset();
-
-    /* Look up hostname now, in case we chroot(). */
-    lookup_hostname( &sa4, sizeof(sa4), &gotv4, &sa6, sizeof(sa6), &gotv6 );
-    if ( ! ( gotv4 || gotv6 ) )
-	{
-	syslog( LOG_ERR, "can't find any valid address" );
-	(void) fprintf( stderr, "%s: can't find any valid address\n", argv0 );
-	exit( 1 );
-	}
-
-    /* Throttle file. */
-    numthrottles = 0;
-    maxthrottles = 0;
-    throttles = (throttletab*) 0;
-    if ( throttlefile != (char*) 0 )
-	read_throttlefile( throttlefile );
-
-    /* If we're root and we're going to become another user, get the uid/gid
-    ** now.
-    */
-    if ( getuid() == 0 )
-	{
-	pwd = getpwnam( user );
-	if ( pwd == (struct passwd*) 0 )
-	    {
-	    syslog( LOG_CRIT, "unknown user - '%.80s'", user );
-	    (void) fprintf( stderr, "%s: unknown user - '%s'\n", argv0, user );
-	    exit( 1 );
-	    }
-	uid = pwd->pw_uid;
-	gid = pwd->pw_gid;
-	}
-
-    /* Log file. */
-    if ( logfile != (char*) 0 )
-	{
-	if ( strcmp( logfile, "/dev/null" ) == 0 )
-	    {
-	    no_log = 1;
-	    logfp = (FILE*) 0;
-	    }
-	else if ( strcmp( logfile, "-" ) == 0 )
-	    logfp = stdout;
-	else
-	    {
-	    logfp = fopen( logfile, "a" );
-	    if ( logfp == (FILE*) 0 )
-		{
-		syslog( LOG_CRIT, "%.80s - %m", logfile );
-		perror( logfile );
-		exit( 1 );
-		}
-	    if ( logfile[0] != '/' )
-		{
-		syslog( LOG_WARNING, "logfile is not an absolute path, you may not be able to re-open it" );
-		(void) fprintf( stderr, "%s: logfile is not an absolute path, you may not be able to re-open it\n", argv0 );
-		}
-	    (void) fcntl( fileno( logfp ), F_SETFD, 1 );
-	    if ( getuid() == 0 )
-		{
-		/* If we are root then we chown the log file to the user we'll
-		** be switching to.
-		*/
-		if ( fchown( fileno( logfp ), uid, gid ) < 0 )
-		    {
-		    syslog( LOG_WARNING, "fchown logfile - %m" );
-		    perror( "fchown logfile" );
-		    }
-		}
-	    }
-	}
-    else
-	logfp = (FILE*) 0;
-
-    /* Switch directories if requested. */
-    if ( dir != (char*) 0 )
-	{
-	if ( chdir( dir ) < 0 )
-	    {
-	    syslog( LOG_CRIT, "chdir - %m" );
-	    perror( "chdir" );
-	    exit( 1 );
-	    }
-	}
-#ifdef USE_USER_DIR
-    else if ( getuid() == 0 )
-	{
-	/* No explicit directory was specified, we're root, and the
-	** USE_USER_DIR option is set - switch to the specified user's
-	** home dir.
-	*/
-	if ( chdir( pwd->pw_dir ) < 0 )
-	    {
-	    syslog( LOG_CRIT, "chdir - %m" );
-	    perror( "chdir" );
-	    exit( 1 );
-	    }
-	}
-#endif /* USE_USER_DIR */
-
-    /* Get current directory. */
-    (void) getcwd( cwd, sizeof(cwd) - 1 );
-    if ( cwd[strlen( cwd ) - 1] != '/' )
-	(void) strcat( cwd, "/" );
-
-    if ( ! debug )
-	{
-	/* We're not going to use stdin stdout or stderr from here on, so close
-	** them to save file descriptors.
-	*/
-	(void) fclose( stdin );
-	if ( logfp != stdout )
-	    (void) fclose( stdout );
-	(void) fclose( stderr );
-
-	/* Daemonize - make ourselves a subprocess. */
-#ifdef HAVE_DAEMON
-	if ( daemon( 1, 1 ) < 0 )
-	    {
-	    syslog( LOG_CRIT, "daemon - %m" );
-	    exit( 1 );
-	    }
-#else /* HAVE_DAEMON */
-	switch ( fork() )
-	    {
-	    case 0:
-	    break;
-	    case -1:
-	    syslog( LOG_CRIT, "fork - %m" );
-	    exit( 1 );
-	    default:
-	    exit( 0 );
-	    }
-#ifdef HAVE_SETSID
-        (void) setsid();
-#endif /* HAVE_SETSID */
-#endif /* HAVE_DAEMON */
-	}
-    else
-	{
-	/* Even if we don't daemonize, we still want to disown our parent
-	** process.
-	*/
-#ifdef HAVE_SETSID
-        (void) setsid();
-#endif /* HAVE_SETSID */
-	}
-
-    if ( pidfile != (char*) 0 )
-	{
-	/* Write the PID file. */
-	FILE* pidfp = fopen( pidfile, "w" );
-	if ( pidfp == (FILE*) 0 )
-	    {
-	    syslog( LOG_CRIT, "%.80s - %m", pidfile );
-	    exit( 1 );
-	    }
-	(void) fprintf( pidfp, "%d\n", (int) getpid() );
-	(void) fclose( pidfp );
-	}
-
-    /* Initialize the fdwatch package.  Have to do this before chroot,
-    ** if /dev/poll is used.
-    */
-    max_connects = fdwatch_get_nfiles();
-    if ( max_connects < 0 )
-	{
-	syslog( LOG_CRIT, "fdwatch initialization failure" );
-	exit( 1 );
-	}
-    max_connects -= SPARE_FDS;
-
-	//printf("filename1=%s\n", filename1);
-
-
-#ifdef __AFL_HAVE_MANUAL_CONTROL
-  __AFL_INIT();
-#endif
-
-	fin = fopen(filename1, "rb");
-	if (NULL == fin) {
-		printf("Failed to read in file. strerror: %s\n", strerror(errno));
-		exit(0);
-	}
-	fseek( fin, 0L , SEEK_END);
-	if( !fin ) perror("blah.txt"),exit(1);
-
-	lSize = ftell( fin );
-	rewind( fin );
-
-	/* allocate memory for entire content */
-	//printf("Filesize: %d\n", lSize);
-	buffer = calloc( 1, lSize+3+1 );
-	if( !buffer ) fclose(fin),fputs("memory alloc fails",stderr),exit(1);
-
-	/* copy the file into the buffer */
-	if( 1!=fread( buffer , lSize, 1 , fin) )
-		fclose(fin),free(buffer),fputs("entire read fails",stderr),exit(1);
-	//printf("File contents: ");
-	//fwrite(buffer, lSize, 1, stdout);
-	//printf("\n");
-
-	//fclose(fin);
-	//free(filename1);
-
-    /* Chroot if requested. */
-    if ( do_chroot )
-	{
-	if ( chroot( cwd ) < 0 )
-	    {
-	    syslog( LOG_CRIT, "chroot - %m" );
-	    perror( "chroot" );
-	    exit( 1 );
-	    }
-	/* If we're logging and the logfile's pathname begins with the
-	** chroot tree's pathname, then elide the chroot pathname so
-	** that the logfile pathname still works from inside the chroot
-	** tree.
-	*/
-	if ( logfile != (char*) 0 && strcmp( logfile, "-" ) != 0 )
-	    {
-	    if ( strncmp( logfile, cwd, strlen( cwd ) ) == 0 )
-		{
-		(void) ol_strcpy( logfile, &logfile[strlen( cwd ) - 1] );
-		/* (We already guaranteed that cwd ends with a slash, so leaving
-		** that slash in logfile makes it an absolute pathname within
-		** the chroot tree.)
-		*/
-		}
-	    else
-		{
-		syslog( LOG_WARNING, "logfile is not within the chroot tree, you will not be able to re-open it" );
-		(void) fprintf( stderr, "%s: logfile is not within the chroot tree, you will not be able to re-open it\n", argv0 );
-		}
-	    }
-	(void) strcpy( cwd, "/" );
-	/* Always chdir to / after a chroot. */
-	if ( chdir( cwd ) < 0 )
-	    {
-	    syslog( LOG_CRIT, "chroot chdir - %m" );
-	    perror( "chroot chdir" );
-	    exit( 1 );
-	    }
-	}
-
-	//printf("Before chdir\n");
-    /* Switch directories again if requested. */
-    if ( data_dir != (char*) 0 )
-	{
-	if ( chdir( data_dir ) < 0 )
-	    {
-	    syslog( LOG_CRIT, "data_dir chdir - %m" );
-	    perror( "data_dir chdir" );
-	    exit( 1 );
-	    }
-	}
-
-    /* Set up to catch signals. */
-#ifdef HAVE_SIGSET
-    (void) sigset( SIGTERM, handle_term );
-    (void) sigset( SIGINT, handle_term );
-    (void) sigset( SIGCHLD, handle_chld );
-    (void) sigset( SIGPIPE, SIG_IGN );          /* get EPIPE instead */
-    (void) sigset( SIGHUP, handle_hup );
-    (void) sigset( SIGUSR1, handle_usr1 );
-    (void) sigset( SIGUSR2, handle_usr2 );
-    (void) sigset( SIGALRM, handle_alrm );
-#else /* HAVE_SIGSET */
-    (void) signal( SIGTERM, handle_term );
-    (void) signal( SIGINT, handle_term );
-    (void) signal( SIGCHLD, handle_chld );
-    (void) signal( SIGPIPE, SIG_IGN );          /* get EPIPE instead */
-    (void) signal( SIGHUP, handle_hup );
-    (void) signal( SIGUSR1, handle_usr1 );
-    (void) signal( SIGUSR2, handle_usr2 );
-    (void) signal( SIGALRM, handle_alrm );
-#endif /* HAVE_SIGSET */
-
-//#ifdef __AFL_HAVE_MANUAL_CONTROL
-			  //__AFL_INIT();
-//#endif
-    got_hup = 0;
-    got_usr1 = 0;
-    watchdog_flag = 0;
-    (void) alarm( OCCASIONAL_TIME * 3 );
-
-    /* Initialize the timer package. */
-    tmr_init();
-
-
-    /* Initialize the HTTP layer.  Got to do this before giving up root,
-    ** so that we can bind to a privileged port.
-    */
-	//printf("Before httpd_initialize\n");
-    hs = httpd_initialize(
-	hostname,
-	gotv4 ? &sa4 : (httpd_sockaddr*) 0, gotv6 ? &sa6 : (httpd_sockaddr*) 0,
-	port, cgi_pattern, cgi_limit, charset, p3p, max_age, cwd, no_log, logfp,
-	no_symlink_check, do_vhost, do_global_passwd, url_pattern,
-	local_pattern, no_empty_referrers );
-    if ( hs == (httpd_server*) 0 )
-	exit( 1 );
-
-	//printf("Before set up occas timer\n");
-
-    /* Set up the occasional timer. */
-
-    if ( tmr_create( (struct timeval*) 0, occasional, JunkClientData, OCCASIONAL_TIME * 1000L, 1 ) == (Timer*) 0 )
-	{
-	syslog( LOG_CRIT, "tmr_create(occasional) failed" );
-	exit( 1 );
-	}
-    /* Set up the idle timer. */
-    if ( tmr_create( (struct timeval*) 0, idle, JunkClientData, 5 * 1000L, 1 ) == (Timer*) 0 )
-	{
-	syslog( LOG_CRIT, "tmr_create(idle) failed" );
-	exit( 1 );
-	}
-	
-	//printf("Before throttles timer.\n");
-
-    if ( numthrottles > 0 )
-	{
-	/* Set up the throttles timer. */
-	if ( tmr_create( (struct timeval*) 0, update_throttles, JunkClientData, THROTTLE_TIME * 1000L, 1 ) == (Timer*) 0 )
-	    {
-	    syslog( LOG_CRIT, "tmr_create(update_throttles) failed" );
-	    exit( 1 );
-	    }
-	}
-#ifdef STATS_TIME
-    /* Set up the stats timer. */
-    if ( tmr_create( (struct timeval*) 0, show_stats, JunkClientData, STATS_TIME * 1000L, 1 ) == (Timer*) 0 )
-	{
-	syslog( LOG_CRIT, "tmr_create(show_stats) failed" );
-	exit( 1 );
-	}
-#endif /* STATS_TIME */
-    start_time = stats_time = time( (time_t*) 0 );
-    stats_connections = 0;
-    stats_bytes = 0;
-    stats_simultaneous = 0;
-
-	//printf("Before setuid\n");
-    /* If we're root, try to become someone else. */
-    if ( getuid() == 0 )
-	{
-	/* Set aux groups to null. */
-	if ( setgroups( 0, (const gid_t*) 0 ) < 0 )
-	    {
-	    syslog( LOG_CRIT, "setgroups - %m" );
-	    exit( 1 );
-	    }
-	/* Set primary group. */
-	if ( setgid( gid ) < 0 )
-	    {
-	    syslog( LOG_CRIT, "setgid - %m" );
-	    exit( 1 );
-	    }
-	/* Try setting aux groups correctly - not critical if this fails. */
-	if ( initgroups( user, gid ) < 0 )
-	    syslog( LOG_WARNING, "initgroups - %m" );
-#ifdef HAVE_SETLOGIN
-	/* Set login name. */
-        (void) setlogin( user );
-#endif /* HAVE_SETLOGIN */
-	/* Set uid. */
-	if ( setuid( uid ) < 0 )
-	    {
-	    syslog( LOG_CRIT, "setuid - %m" );
-	    exit( 1 );
-	    }
-	/* Check for unnecessary security exposure. */
-	if ( ! do_chroot )
-	    syslog(
-		LOG_WARNING,
-		"started as root without requesting chroot(), warning only" );
-	}
-
-    /* Initialize our connections table. */
-    connects = NEW( connecttab, max_connects );
-    if ( connects == (connecttab*) 0 )
-	{
-	syslog( LOG_CRIT, "out of memory allocating a connecttab" );
-	exit( 1 );
-	}
-    for ( cnum = 0; cnum < max_connects; ++cnum )
-	{
-	connects[cnum].conn_state = CNST_FREE;
-	connects[cnum].next_free_connect = cnum + 1;
-	connects[cnum].hc = (httpd_conn*) 0;
-	}
-    connects[max_connects - 1].next_free_connect = -1;	/* end of link list */
-    first_free_connect = 0;
-    num_connects = 0;
-    httpd_conn_count = 0;
-
-    if ( hs != (httpd_server*) 0 )
-	{
-	if ( hs->listen4_fd != -1 )
-	    fdwatch_add_fd( hs->listen4_fd, (void*) 0, FDW_READ );
-	if ( hs->listen6_fd != -1 )
-	    fdwatch_add_fd( hs->listen6_fd, (void*) 0, FDW_READ );
-	}
-
-
-	//printf("Before main loop\n");
-
-    /* Main loop. */
-    (void) gettimeofday( &tv, (struct timezone*) 0 );
-    while ( ( ! terminate ) || num_connects > 0 )
-	{
-	//printf("In main loop1\n");
-	/* Do we need to re-open the log file? */
-	if ( got_hup )
-	    {
-	    re_open_logfile();
-	    got_hup = 0;
-	    }
-
-	//printf("In main loop2\n");
-//#ifdef KNOT_AFL_PERSISTENT_SHIM  /* For AFL persistent mode fuzzing shim  */
-
-	/* Read fuzzed packet from stdin and send to socket */
-	
-	if (getenv("THTTPD_AFL_CMIN") || getenv("AFL_PERSISTENT")) {
-
-		//printf("Detected AFL_PERSISTENT\n");
-
-		if (sent_msg == 1) {
-			//exit(0);
-			//got_usr1=1;
-			//handle_usr1(1);
-			//printf("Reading HTTP response\n");
-
-			flags = fcntl(sock, F_GETFL, 0);
-			if (flags == -1) {
-				printf("Failed to get socket flags\n");
-				exit(0);
-			}
-			flags = flags | O_NONBLOCK;
-			fcntl(sock, F_SETFL, flags);
-
-			recv_len = read(sock, recv_buff, 5120);
-			if (-1 != recv_len) {
-				//printf ("Received %d bytes.\n", recv_len);
-					close(sock);
-					free(filename1);
-					exit(0);
-			}
-
-		} else {
-
-			/*
-			   memset(buf, 0, 5120);
-			   insize = read(0, buf, 5120);
-			   udp_socket = hs->listen6_fd; //((iface_t*)HEAD(handler->server->ifaces->l))->fd[IO_UDP];
-			   sent_size = sendto(udp_socket, buf, insize,0, (struct sockaddr *)&servaddr,sizeof(servaddr));
-			   if (sent_size == -1) 
-			   printf("errno = %s\n", strerror(errno));
-			   printf("buf: %s udp_socket=  %d sent_size= %d\n", buf, udp_socket, sent_size);
-			   */
-
-			//printf("hello=%s\n", hello);
-
-			//fclose(fin);
-			if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) 
-			{ 
-				printf("\n Socket creation error \n"); 
-				return -1; 
-			} 
-
-			serv_addr.sin_family = AF_INET; 
-			serv_addr.sin_port = htons(port); 
-			//serv_addr.sin_port = htons(31337); 
-/*
-			if ((ntohs(serv_addr.sin_port) == 0)) {
-				printf("Converting port failed\n");
-				exit(0);
-			}
-*/
-
-			// Convert IPv4 and IPv6 addresses from text to binary form 
-			if(inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr)<=0)  
-			{ 
-				printf("\nInvalid address/ Address not supported \n"); 
-				return -1; 
-			} 
-
-			//printf("Ready to send\n");
-			if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) 
-			{ 
-				printf("\nConnection Failed strerr: %s\n", strerror(errno)); 
-				printf("serv_addr.sin_family=%d serv_addr.sin_addr=%s serv_addr.sin_port=%x\n", 
-						serv_addr.sin_family, &serv_addr.sin_addr, ntohl(serv_addr.sin_port));
-				return -1; 
-			} 
-			//buffer = strcat(buffer, "\x0d\x0a\x0d\x0a");
-			buffer[lSize] = 0x0d;
-			buffer[lSize+1] = 0x0a;
-			buffer[lSize+2] = 0x0d;
-			buffer[lSize+3] = 0x0a;
-			//printf("File trailing bits: %x %x lSize+2: %d\n", buffer[lSize], buffer[lSize+1], lSize+2);
-			fwrite(buffer, lSize+3, 1, stdout);
-
-			send(sock , buffer, lSize+4, 0 ); 
-			sent_msg = 1;
-			//handle_usr1(1);
-		}
-	}
-
-//#endif // #ifdef KNOT_AFL_PERSISTENT_SHIM
-
-	// TODO
-	//printf("In main loop1 before fd_watch\n");
-
-	/* Do the fd watch. */
-	num_ready = fdwatch( tmr_mstimeout( &tv ) );
-	// TODO
-	//printf("In main loop1.5 after fdwatch\n");
-
-	if ( num_ready < 0 )
-	    {
-		// TODO
-		//printf("In fd_watch num_read < 0\n");
-
-	    if ( errno == EINTR || errno == EAGAIN )
-		continue;       /* try again */
-	    syslog( LOG_ERR, "fdwatch - %m" );
-	    exit( 1 );
-	    }
-	(void) gettimeofday( &tv, (struct timezone*) 0 );
-
-	if ( num_ready == 0 )
-	    {
-	    /* No fd's are ready - run the timers. */
-	    tmr_run( &tv );
-	    continue;
-	    }
-
-	// TODO
-	//printf("In main loop2 before new conn\n");
-
-	/* Is it a new connection? */
-	if ( hs != (httpd_server*) 0 && hs->listen6_fd != -1 &&
-	     fdwatch_check_fd( hs->listen6_fd ) )
-	    {
-	    if ( handle_newconnect( &tv, hs->listen6_fd ) )
-		/* Go around the loop and do another fdwatch, rather than
-		** dropping through and processing existing connections.
-		** New connections always get priority.
-		*/
-		continue;
-	    }
-	if ( hs != (httpd_server*) 0 && hs->listen4_fd != -1 &&
-	     fdwatch_check_fd( hs->listen4_fd ) )
-	    {
-	    if ( handle_newconnect( &tv, hs->listen4_fd ) )
-		/* Go around the loop and do another fdwatch, rather than
-		** dropping through and processing existing connections.
-		** New connections always get priority.
-		*/
-		continue;
-	    }
-
-	/* Find the connections that need servicing. */
-	while ( ( c = (connecttab*) fdwatch_get_next_client_data() ) != (connecttab*) -1 )
-	    {
-	    if ( c == (connecttab*) 0 )
-		continue;
-	    hc = c->hc;
-	    if ( ! fdwatch_check_fd( hc->conn_fd ) )
-		/* Something went wrong. */
-		clear_connection( c, &tv );
-	    else
-		switch ( c->conn_state )
-		    {
-		    case CNST_READING: handle_read( c, &tv ); break;
-		    case CNST_SENDING: handle_send( c, &tv ); break;
-		    case CNST_LINGERING: handle_linger( c, &tv ); break;
-		    }
-	    }
-	tmr_run( &tv );
-
-	if ( got_usr1 && ! terminate )
-	    {
-			// TODO
-			//printf("got_usr1 && ! terminate\n");
-	    terminate = 1;
-	    if ( hs != (httpd_server*) 0 )
-		{
-		if ( hs->listen4_fd != -1 )
-		    fdwatch_del_fd( hs->listen4_fd );
-		if ( hs->listen6_fd != -1 )
-		    fdwatch_del_fd( hs->listen6_fd );
-		httpd_unlisten( hs );
-		}
-	    }
-	}
-
-    /* The main loop terminated. */
-    shut_down();
-    syslog( LOG_NOTICE, "exiting" );
-    closelog();
-    exit( 0 );
-    }
+//int
+//main( int argc, char** argv )
+//    {
+//    char* cp;
+//    struct passwd* pwd;
+//    uid_t uid = 32767;
+//    gid_t gid = 32767;
+//    char cwd[MAXPATHLEN+1];
+//    FILE* logfp;
+//    int num_ready;
+//    int cnum;
+//    connecttab* c;
+//    httpd_conn* hc;
+//    httpd_sockaddr sa4;
+//    httpd_sockaddr sa6;
+//    int gotv4, gotv6;
+//    struct timeval tv;
+//
+//    argv0 = argv[0];
+//
+//    cp = strrchr( argv0, '/' );
+//    if ( cp != (char*) 0 )
+//	++cp;
+//    else
+//	cp = argv0;
+//    openlog( cp, LOG_NDELAY|LOG_PID, LOG_FACILITY );
+//
+//    /* Handle command-line arguments. */
+//    parse_args( argc, argv );
+//
+//    /* Read zone info now, in case we chroot(). */
+//    tzset();
+//
+//    /* Look up hostname now, in case we chroot(). */
+//    lookup_hostname( &sa4, sizeof(sa4), &gotv4, &sa6, sizeof(sa6), &gotv6 );
+//    if ( ! ( gotv4 || gotv6 ) )
+//	{
+//	syslog( LOG_ERR, "can't find any valid address" );
+//	(void) fprintf( stderr, "%s: can't find any valid address\n", argv0 );
+//	exit( 1 );
+//	}
+//
+//    /* Throttle file. */
+//    numthrottles = 0;
+//    maxthrottles = 0;
+//    throttles = (throttletab*) 0;
+//    if ( throttlefile != (char*) 0 )
+//	read_throttlefile( throttlefile );
+//
+//    /* If we're root and we're going to become another user, get the uid/gid
+//    ** now.
+//    */
+//    if ( getuid() == 0 )
+//	{
+//	pwd = getpwnam( user );
+//	if ( pwd == (struct passwd*) 0 )
+//	    {
+//	    syslog( LOG_CRIT, "unknown user - '%.80s'", user );
+//	    (void) fprintf( stderr, "%s: unknown user - '%s'\n", argv0, user );
+//	    exit( 1 );
+//	    }
+//	uid = pwd->pw_uid;
+//	gid = pwd->pw_gid;
+//	}
+//
+//    /* Log file. */
+//    if ( logfile != (char*) 0 )
+//	{
+//	if ( strcmp( logfile, "/dev/null" ) == 0 )
+//	    {
+//	    no_log = 1;
+//	    logfp = (FILE*) 0;
+//	    }
+//	else if ( strcmp( logfile, "-" ) == 0 )
+//	    logfp = stdout;
+//	else
+//	    {
+//	    logfp = fopen( logfile, "a" );
+//	    if ( logfp == (FILE*) 0 )
+//		{
+//		syslog( LOG_CRIT, "%.80s - %m", logfile );
+//		perror( logfile );
+//		exit( 1 );
+//		}
+//	    if ( logfile[0] != '/' )
+//		{
+//		syslog( LOG_WARNING, "logfile is not an absolute path, you may not be able to re-open it" );
+//		(void) fprintf( stderr, "%s: logfile is not an absolute path, you may not be able to re-open it\n", argv0 );
+//		}
+//	    (void) fcntl( fileno( logfp ), F_SETFD, 1 );
+//	    if ( getuid() == 0 )
+//		{
+//		/* If we are root then we chown the log file to the user we'll
+//		** be switching to.
+//		*/
+//		if ( fchown( fileno( logfp ), uid, gid ) < 0 )
+//		    {
+//		    syslog( LOG_WARNING, "fchown logfile - %m" );
+//		    perror( "fchown logfile" );
+//		    }
+//		}
+//	    }
+//	}
+//    else
+//	logfp = (FILE*) 0;
+//
+//    /* Switch directories if requested. */
+//    if ( dir != (char*) 0 )
+//	{
+//	if ( chdir( dir ) < 0 )
+//	    {
+//	    syslog( LOG_CRIT, "chdir - %m" );
+//	    perror( "chdir" );
+//	    exit( 1 );
+//	    }
+//	}
+//#ifdef USE_USER_DIR
+//    else if ( getuid() == 0 )
+//	{
+//	/* No explicit directory was specified, we're root, and the
+//	** USE_USER_DIR option is set - switch to the specified user's
+//	** home dir.
+//	*/
+//	if ( chdir( pwd->pw_dir ) < 0 )
+//	    {
+//	    syslog( LOG_CRIT, "chdir - %m" );
+//	    perror( "chdir" );
+//	    exit( 1 );
+//	    }
+//	}
+//#endif /* USE_USER_DIR */
+//
+//    /* Get current directory. */
+//    (void) getcwd( cwd, sizeof(cwd) - 1 );
+//    if ( cwd[strlen( cwd ) - 1] != '/' )
+//	(void) strcat( cwd, "/" );
+//
+//    if ( ! debug )
+//	{
+//	/* We're not going to use stdin stdout or stderr from here on, so close
+//	** them to save file descriptors.
+//	*/
+//	(void) fclose( stdin );
+//	if ( logfp != stdout )
+//	    (void) fclose( stdout );
+//	(void) fclose( stderr );
+//
+//	/* Daemonize - make ourselves a subprocess. */
+//#ifdef HAVE_DAEMON
+//	if ( daemon( 1, 1 ) < 0 )
+//	    {
+//	    syslog( LOG_CRIT, "daemon - %m" );
+//	    exit( 1 );
+//	    }
+//#else /* HAVE_DAEMON */
+//	switch ( fork() )
+//	    {
+//	    case 0:
+//	    break;
+//	    case -1:
+//	    syslog( LOG_CRIT, "fork - %m" );
+//	    exit( 1 );
+//	    default:
+//	    exit( 0 );
+//	    }
+//#ifdef HAVE_SETSID
+//        (void) setsid();
+//#endif /* HAVE_SETSID */
+//#endif /* HAVE_DAEMON */
+//	}
+//    else
+//	{
+//	/* Even if we don't daemonize, we still want to disown our parent
+//	** process.
+//	*/
+//#ifdef HAVE_SETSID
+//        (void) setsid();
+//#endif /* HAVE_SETSID */
+//	}
+//
+//    if ( pidfile != (char*) 0 )
+//	{
+//	/* Write the PID file. */
+//	FILE* pidfp = fopen( pidfile, "w" );
+//	if ( pidfp == (FILE*) 0 )
+//	    {
+//	    syslog( LOG_CRIT, "%.80s - %m", pidfile );
+//	    exit( 1 );
+//	    }
+//	(void) fprintf( pidfp, "%d\n", (int) getpid() );
+//	(void) fclose( pidfp );
+//	}
+//
+//    /* Initialize the fdwatch package.  Have to do this before chroot,
+//    ** if /dev/poll is used.
+//    */
+//    max_connects = fdwatch_get_nfiles();
+//    if ( max_connects < 0 )
+//	{
+//	syslog( LOG_CRIT, "fdwatch initialization failure" );
+//	exit( 1 );
+//	}
+//    max_connects -= SPARE_FDS;
+//
+//    /* Chroot if requested. */
+//    if ( do_chroot )
+//	{
+//	if ( chroot( cwd ) < 0 )
+//	    {
+//	    syslog( LOG_CRIT, "chroot - %m" );
+//	    perror( "chroot" );
+//	    exit( 1 );
+//	    }
+//	/* If we're logging and the logfile's pathname begins with the
+//	** chroot tree's pathname, then elide the chroot pathname so
+//	** that the logfile pathname still works from inside the chroot
+//	** tree.
+//	*/
+//	if ( logfile != (char*) 0 && strcmp( logfile, "-" ) != 0 )
+//	    {
+//	    if ( strncmp( logfile, cwd, strlen( cwd ) ) == 0 )
+//		{
+//		(void) ol_strcpy( logfile, &logfile[strlen( cwd ) - 1] );
+//		/* (We already guaranteed that cwd ends with a slash, so leaving
+//		** that slash in logfile makes it an absolute pathname within
+//		** the chroot tree.)
+//		*/
+//		}
+//	    else
+//		{
+//		syslog( LOG_WARNING, "logfile is not within the chroot tree, you will not be able to re-open it" );
+//		(void) fprintf( stderr, "%s: logfile is not within the chroot tree, you will not be able to re-open it\n", argv0 );
+//		}
+//	    }
+//	(void) strcpy( cwd, "/" );
+//	/* Always chdir to / after a chroot. */
+//	if ( chdir( cwd ) < 0 )
+//	    {
+//	    syslog( LOG_CRIT, "chroot chdir - %m" );
+//	    perror( "chroot chdir" );
+//	    exit( 1 );
+//	    }
+//	}
+//
+//    /* Switch directories again if requested. */
+//    if ( data_dir != (char*) 0 )
+//	{
+//	if ( chdir( data_dir ) < 0 )
+//	    {
+//	    syslog( LOG_CRIT, "data_dir chdir - %m" );
+//	    perror( "data_dir chdir" );
+//	    exit( 1 );
+//	    }
+//	}
+//
+//    /* Set up to catch signals. */
+//#ifdef HAVE_SIGSET
+//    (void) sigset( SIGTERM, handle_term );
+//    (void) sigset( SIGINT, handle_term );
+//    (void) sigset( SIGCHLD, handle_chld );
+//    (void) sigset( SIGPIPE, SIG_IGN );          /* get EPIPE instead */
+//    (void) sigset( SIGHUP, handle_hup );
+//    (void) sigset( SIGUSR1, handle_usr1 );
+//    (void) sigset( SIGUSR2, handle_usr2 );
+//    (void) sigset( SIGALRM, handle_alrm );
+//#else /* HAVE_SIGSET */
+//    (void) signal( SIGTERM, handle_term );
+//    (void) signal( SIGINT, handle_term );
+//    (void) signal( SIGCHLD, handle_chld );
+//    (void) signal( SIGPIPE, SIG_IGN );          /* get EPIPE instead */
+//    (void) signal( SIGHUP, handle_hup );
+//    (void) signal( SIGUSR1, handle_usr1 );
+//    (void) signal( SIGUSR2, handle_usr2 );
+//    (void) signal( SIGALRM, handle_alrm );
+//#endif /* HAVE_SIGSET */
+//    got_hup = 0;
+//    got_usr1 = 0;
+//    watchdog_flag = 0;
+//    (void) alarm( OCCASIONAL_TIME * 3 );
+//
+//    /* Initialize the timer package. */
+//    tmr_init();
+//
+//    /* Initialize the HTTP layer.  Got to do this before giving up root,
+//    ** so that we can bind to a privileged port.
+//    */
+//    hs = httpd_initialize(
+//	hostname,
+//	gotv4 ? &sa4 : (httpd_sockaddr*) 0, gotv6 ? &sa6 : (httpd_sockaddr*) 0,
+//	port, cgi_pattern, cgi_limit, charset, p3p, max_age, cwd, no_log, logfp,
+//	no_symlink_check, do_vhost, do_global_passwd, url_pattern,
+//	local_pattern, no_empty_referrers );
+//    if ( hs == (httpd_server*) 0 )
+//	exit( 1 );
+//
+//    /* Set up the occasional timer. */
+//    if ( tmr_create( (struct timeval*) 0, occasional, JunkClientData, OCCASIONAL_TIME * 1000L, 1 ) == (Timer*) 0 )
+//	{
+//	syslog( LOG_CRIT, "tmr_create(occasional) failed" );
+//	exit( 1 );
+//	}
+//    /* Set up the idle timer. */
+//    if ( tmr_create( (struct timeval*) 0, idle, JunkClientData, 5 * 1000L, 1 ) == (Timer*) 0 )
+//	{
+//	syslog( LOG_CRIT, "tmr_create(idle) failed" );
+//	exit( 1 );
+//	}
+//    if ( numthrottles > 0 )
+//	{
+//	/* Set up the throttles timer. */
+//	if ( tmr_create( (struct timeval*) 0, update_throttles, JunkClientData, THROTTLE_TIME * 1000L, 1 ) == (Timer*) 0 )
+//	    {
+//	    syslog( LOG_CRIT, "tmr_create(update_throttles) failed" );
+//	    exit( 1 );
+//	    }
+//	}
+//#ifdef STATS_TIME
+//    /* Set up the stats timer. */
+//    if ( tmr_create( (struct timeval*) 0, show_stats, JunkClientData, STATS_TIME * 1000L, 1 ) == (Timer*) 0 )
+//	{
+//	syslog( LOG_CRIT, "tmr_create(show_stats) failed" );
+//	exit( 1 );
+//	}
+//#endif /* STATS_TIME */
+//    start_time = stats_time = time( (time_t*) 0 );
+//    stats_connections = 0;
+//    stats_bytes = 0;
+//    stats_simultaneous = 0;
+//
+//    /* If we're root, try to become someone else. */
+//    if ( getuid() == 0 )
+//	{
+//	/* Set aux groups to null. */
+//	if ( setgroups( 0, (const gid_t*) 0 ) < 0 )
+//	    {
+//	    syslog( LOG_CRIT, "setgroups - %m" );
+//	    exit( 1 );
+//	    }
+//	/* Set primary group. */
+//	if ( setgid( gid ) < 0 )
+//	    {
+//	    syslog( LOG_CRIT, "setgid - %m" );
+//	    exit( 1 );
+//	    }
+//	/* Try setting aux groups correctly - not critical if this fails. */
+//	if ( initgroups( user, gid ) < 0 )
+//	    syslog( LOG_WARNING, "initgroups - %m" );
+//#ifdef HAVE_SETLOGIN
+//	/* Set login name. */
+//        (void) setlogin( user );
+//#endif /* HAVE_SETLOGIN */
+//	/* Set uid. */
+//	if ( setuid( uid ) < 0 )
+//	    {
+//	    syslog( LOG_CRIT, "setuid - %m" );
+//	    exit( 1 );
+//	    }
+//	/* Check for unnecessary security exposure. */
+//	if ( ! do_chroot )
+//	    syslog(
+//		LOG_WARNING,
+//		"started as root without requesting chroot(), warning only" );
+//	}
+//
+//    /* Initialize our connections table. */
+//    connects = NEW( connecttab, max_connects );
+//    if ( connects == (connecttab*) 0 )
+//	{
+//	syslog( LOG_CRIT, "out of memory allocating a connecttab" );
+//	exit( 1 );
+//	}
+//    for ( cnum = 0; cnum < max_connects; ++cnum )
+//	{
+//	connects[cnum].conn_state = CNST_FREE;
+//	connects[cnum].next_free_connect = cnum + 1;
+//	connects[cnum].hc = (httpd_conn*) 0;
+//	}
+//    connects[max_connects - 1].next_free_connect = -1;	/* end of link list */
+//    first_free_connect = 0;
+//    num_connects = 0;
+//    httpd_conn_count = 0;
+//
+//    if ( hs != (httpd_server*) 0 )
+//	{
+//	if ( hs->listen4_fd != -1 )
+//	    fdwatch_add_fd( hs->listen4_fd, (void*) 0, FDW_READ );
+//	if ( hs->listen6_fd != -1 )
+//	    fdwatch_add_fd( hs->listen6_fd, (void*) 0, FDW_READ );
+//	}
+//
+//    /* Main loop. */
+//    (void) gettimeofday( &tv, (struct timezone*) 0 );
+//    while ( ( ! terminate ) || num_connects > 0 )
+//	{
+//	/* Do we need to re-open the log file? */
+//	if ( got_hup )
+//	    {
+//	    re_open_logfile();
+//	    got_hup = 0;
+//	    }
+//
+//	/* Do the fd watch. */
+//	num_ready = fdwatch( tmr_mstimeout( &tv ) );
+//	if ( num_ready < 0 )
+//	    {
+//	    if ( errno == EINTR || errno == EAGAIN )
+//		continue;       /* try again */
+//	    syslog( LOG_ERR, "fdwatch - %m" );
+//	    exit( 1 );
+//	    }
+//	(void) gettimeofday( &tv, (struct timezone*) 0 );
+//
+//	if ( num_ready == 0 )
+//	    {
+//	    /* No fd's are ready - run the timers. */
+//	    tmr_run( &tv );
+//	    continue;
+//	    }
+//
+//	/* Is it a new connection? */
+//	if ( hs != (httpd_server*) 0 && hs->listen6_fd != -1 &&
+//	     fdwatch_check_fd( hs->listen6_fd ) )
+//	    {
+//	    if ( handle_newconnect( &tv, hs->listen6_fd ) )
+//		/* Go around the loop and do another fdwatch, rather than
+//		** dropping through and processing existing connections.
+//		** New connections always get priority.
+//		*/
+//		continue;
+//	    }
+//	if ( hs != (httpd_server*) 0 && hs->listen4_fd != -1 &&
+//	     fdwatch_check_fd( hs->listen4_fd ) )
+//	    {
+//	    if ( handle_newconnect( &tv, hs->listen4_fd ) )
+//		/* Go around the loop and do another fdwatch, rather than
+//		** dropping through and processing existing connections.
+//		** New connections always get priority.
+//		*/
+//		continue;
+//	    }
+//
+//	/* Find the connections that need servicing. */
+//	while ( ( c = (connecttab*) fdwatch_get_next_client_data() ) != (connecttab*) -1 )
+//	    {
+//	    if ( c == (connecttab*) 0 )
+//		continue;
+//	    hc = c->hc;
+//	    if ( ! fdwatch_check_fd( hc->conn_fd ) )
+//		/* Something went wrong. */
+//		clear_connection( c, &tv );
+//	    else
+//		switch ( c->conn_state )
+//		    {
+//		    case CNST_READING: handle_read( c, &tv ); break;
+//		    case CNST_SENDING: handle_send( c, &tv ); break;
+//		    case CNST_LINGERING: handle_linger( c, &tv ); break;
+//		    }
+//	    }
+//	tmr_run( &tv );
+//
+//	if ( got_usr1 && ! terminate )
+//	    {
+//	    terminate = 1;
+//	    if ( hs != (httpd_server*) 0 )
+//		{
+//		if ( hs->listen4_fd != -1 )
+//		    fdwatch_del_fd( hs->listen4_fd );
+//		if ( hs->listen6_fd != -1 )
+//		    fdwatch_del_fd( hs->listen6_fd );
+//		httpd_unlisten( hs );
+//		}
+//	    }
+//	}
+//
+//    /* The main loop terminated. */
+//    shut_down();
+//    syslog( LOG_NOTICE, "exiting" );
+//    closelog();
+//    exit( 0 );
+//    }
 
 
 static void
@@ -1159,10 +975,6 @@ parse_args( int argc, char** argv )
 	    ++argn;
 	    max_age = atoi( argv[argn] );
 	    }
-	else if ( strcmp( argv[argn], "-F" ) == 0 && argn + 1 < argc ) {
-			++argn;
-			filename1 = strdup(argv[argn]);
-	}
 	else if ( strcmp( argv[argn], "-D" ) == 0 )
 	    debug = 1;
 	else
