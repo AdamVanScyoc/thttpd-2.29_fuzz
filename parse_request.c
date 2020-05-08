@@ -97,9 +97,7 @@ typedef long long int64_t;
 static size_t sockaddr_len( httpd_sockaddr* saP );
 
 int main(int argc, char*argv[]) {
-	// TODO get port from argv
 	int port = 8989;
-	// TODO get current wd from argv
 	char * cwd = strdup("/home/httpd1/html");
 	time_t timer;
     char time_buffer[26];
@@ -143,39 +141,6 @@ int main(int argc, char*argv[]) {
 	hc->maxaccept  = 200;
 	hc->maxaccepte  = 200;
 	hc->maxresponse = 200;
-	//hc->decodedurl = strdup("AAAA");
-	//hc->encodedurl = strdup("AAAA");
-	// TODO may need more buffer space than hc->maxdecodedurl
-	//hc->encodedurl = calloc(hc->maxdecodedurl, 1);
-	//hc->decodedurl = calloc(hc->maxdecodedurl, 1);
-	//hc->protocol = strdup("UNKNOWN");
-	//hc->origfilename = strdup("");
-	//hc->origfilename = calloc(hc->maxorigfilename, 1);
-	//hc->expnfilename = strdup("");
-	//hc->expnfilename = calloc(hc->maxexpnfilename, 1);
-	//hc->encodings = strdup("");
-	//hc->pathinfo = strdup("");
-	//hc->query = strdup("");
-	//hc->referrer = strdup("");
-	//hc->useragent = strdup("");
-	//hc->accept = strdup("");
-	// TODO may need more buffer space than hc->maxresponse
-	//hc->accept = calloc(hc->maxaccept, 1);
-	//hc->acceptl = calloc(hc->maxaccept, 1);
-	//hc->accepte = calloc(hc->maxaccept, 1);
-	//hc->accepte = strdup("");
-	//hc->acceptl = strdup("");
-	//hc->cookie = strdup("");
-	//hc->contenttype = strdup("");
-	//hc->reqhost = strdup("");
-	//hc->reqhost = calloc(hc->maxaccept, 1);
-	//hc->hdrhost = strdup("");
-	//hc->hdrhost = calloc(hc->maxaccept, 1);
-	//hc->hostdir = strdup("");
-	//hc->authorization = strdup("");
-	//hc->remoteuser = strdup("");
-	//hc->remoteuser = calloc(hc->maxremoteuser, 1);
-	//hc->response = calloc(hc->maxresponse, 1);
 
 //////////////////////////////////////////////////////////
     httpd_sockaddr sa;
@@ -294,13 +259,14 @@ int main(int argc, char*argv[]) {
 	fseek( fd, 0L, SEEK_END);
 	lSize = ftell( fd );
 	rewind( fd );
-	hc->read_buf = calloc(lSize+3, 1);
+	//hc->read_buf = calloc(lSize+3, 1);
+	hc->read_buf = calloc(lSize, 1);
 	if ( 1 != fread( hc->read_buf, lSize, 1, fd)) {
-		fputs("entire read fails", stderr);
+		fputs("entire read failed", stderr);
 		return -1;
 	}
-	lSize += 3L;
-	hc->read_buf = strcat(hc->read_buf, "\x0d\x0a");
+	//lSize += 3L;
+	//hc->read_buf = strcat(hc->read_buf, "\x0d\x0a");
 	hc->read_idx = lSize;
 
 	int rtrn = httpd_parse_request(hc);
