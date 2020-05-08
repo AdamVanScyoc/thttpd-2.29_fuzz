@@ -1,4 +1,12 @@
 *.swo
 *.swp
 *.o
+thttpd
 parse_request
+cgi-src/*.o
+extras/*.o
+cgi-src/redirect
+extras/makeweb
+extras/htpasswd
+cgi-src/phf
+cgi-src/ssi
