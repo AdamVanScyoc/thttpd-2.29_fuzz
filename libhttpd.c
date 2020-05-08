@@ -1951,7 +1951,7 @@ httpd_got_request( httpd_conn* hc )
 
 
 int
-httpd_parse_request( httpd_conn* hc, int * useragent_alloc )
+httpd_parse_request( httpd_conn* hc)
     {
     char* buf;
     char* method_str;
@@ -2098,7 +2098,6 @@ httpd_parse_request( httpd_conn* hc, int * useragent_alloc )
 		}
 	    else if ( strncasecmp( buf, "User-Agent:", 11 ) == 0 )
 		{
-		*useragent_alloc = 1;
 		cp = &buf[11];
 		cp += strspn( cp, " \t" );
 		hc->useragent = cp;

@@ -101,6 +101,9 @@ int main(int argc, char*argv[]) {
 	int port = 8989;
 	// TODO get current wd from argv
 	char * cwd = strdup("/home/httpd1/html");
+	time_t timer;
+    char time_buffer[26];
+    struct tm* tm_info;
 
 	httpd_conn* hc;
 	hc = calloc(sizeof(httpd_conn), 1);
@@ -123,16 +126,8 @@ int main(int argc, char*argv[]) {
 	hc->hs->local_pattern = 0;
 	hc->hs->no_empty_referrers = 0;
 
-	// TODO afaict, only used in logging errors
-	//hc->client_addr = calloc(sizeof(httpd_sockaddr), 1);	
-
 	hc->initialized = 1;
-	// TODO get request string from file/argv
-	//hc->read_buf = strdup("GET / HTTP/1.0\r\nHost: localhost:8989\r\nUser-Agent: curl/7.68.0\r\nAccept: */*\r\n\r\n");
-	//hc->read_buf = calloc(600, 1);
 
-	int * useragent_alloc = calloc(sizeof(int *), 1);
-	
 	hc->mime_flag=1;
 	hc->read_size = 600;
 	hc->checked_idx = 77;
@@ -291,11 +286,6 @@ int main(int argc, char*argv[]) {
 	}
 	(void) fcntl( fileno( logfp ), F_SETFD, 1 );
 	
-
-	//strcpy(hc->read_buf, "GET / HTTP/1.0\r\nHost: localhost:8989\r\nUser-Agent: curl/7.68.0\r\nAccept: */*\r\n\r\n\x00");
-	// TODO change size
-	//hc->read_idx = 78;
-
 	fd = fopen(argv[2], "rb");
 	if (NULL == fd) {
 		printf("Failed to read in test file. strerror: %s\n", strerror(errno));
@@ -313,20 +303,20 @@ int main(int argc, char*argv[]) {
 	hc->read_buf = strcat(hc->read_buf, "\x0d\x0a");
 	hc->read_idx = lSize;
 
-	//if (NULL == strcasestr(hc->read_buf, "http://"))
+	int rtrn = httpd_parse_request(hc);
 
-	//if (NULL == strcasestr(hc->read_buf, "User-Agent"))
-			//hc->useragent = calloc(200, 1);
+    timer = time(NULL);
+    tm_info = localtime(&timer);
 
+    strftime(time_buffer, 26, "%H:%M:%S %d-%m-%Y", tm_info);
 
-	int rtrn = httpd_parse_request(hc, useragent_alloc);
+	fprintf(logfp, "%d \"%s\" \"%s\" \"%s\" \"%s\" %d %s\n", hc->method, hc->read_buf, hc->decodedurl, 
+					hc->protocol, hc->useragent, rtrn, time_buffer);
 
 	free(hc->hs->server_hostname);
 	free(hc->hs->charset);
 	free(hc->hs->p3p);
 	free(hc->hs);
-
-	//free(hc->client_addr);
 
 	//free(hc->read_buf );
 	//free(hc->encodedurl);
@@ -342,14 +332,7 @@ int main(int argc, char*argv[]) {
 	//free(hc->acceptl);
 	//free(hc->hdrhost);
 	free(hc->reqhost);
-	//if (NULL != strstr(hc->read_buf, "User-Agent"))
-	//if (*useragent_alloc == 1)
-			//free(hc->useragent);
-	//free(hc->cookie);
-	//if (NULL != strstr(hc->read_buf, "Content-Type"))
-			//free(hc->contenttype);
 	free(hc->hostdir);
-	//free(hc->authorization);
 	free(hc->remoteuser);
 	free(hc->response);
 
@@ -357,7 +340,6 @@ int main(int argc, char*argv[]) {
 	free(hc);
 
 	free(cwd);
-	free(useragent_alloc);
 
 return rtrn;
 }
