@@ -51,8 +51,8 @@ export ASAN_OPTIONS=detect_leaks=0
 
 #CC =		gcc
 CC =		afl-clang-fast
-CCOPT =		-O2
-#CCOPT =		-g 
+#CCOPT =		-O2
+CCOPT =		-g
 DEFS =		 -DHAVE__PROGNAME=1 -DHAVE_FCNTL_H=1 -DHAVE_GRP_H=1 -DHAVE_MEMORY_H=1 -DHAVE_PATHS_H=1 -DHAVE_POLL_H=1 -DHAVE_SYS_POLL_H=1 -DTIME_WITH_SYS_TIME=1 -DHAVE_DIRENT_H=1 -DHAVE_LIBCRYPT=1 -DHAVE_STRERROR=1 -DHAVE_WAITPID=1 -DHAVE_VSNPRINTF=1 -DHAVE_DAEMON=1 -DHAVE_SETSID=1 -DHAVE_GETADDRINFO=1 -DHAVE_GETNAMEINFO=1 -DHAVE_GAI_STRERROR=1 -DHAVE_SIGSET=1 -DHAVE_ATOLL=1 -DHAVE_UNISTD_H=1 -DHAVE_GETPAGESIZE=1 -DHAVE_MMAP=1 -DHAVE_SELECT=1 -DHAVE_POLL=1 -DHAVE_TM_GMTOFF=1 -DHAVE_INT64T=1 -DHAVE_SOCKLENT=1 
 INCLS =		-I.
 CFLAGS =	$(CCOPT) $(DEFS) $(INCLS)
@@ -92,7 +92,7 @@ thttpd: $(OBJ)
 
 parse_request:
 	#$(CC) $(CFLAGS) $(LDFLAGS) -o parse_request parse_request.c thttpd.o fdwatch.o mmc.o timers.o match.o tdate_parse.o $(LIBS) $(NETLIBS)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o parse_request parse_request.c timers.o mmc.o tdate_parse.o match.o libhttpd.o  $(LIBS) $(NETLIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o parse_request parse_request.c fdwatch.o timers.o mmc.o tdate_parse.o match.o libhttpd.o  $(LIBS) $(NETLIBS)
 
 mime_encodings.h:	mime_encodings.txt
 	rm -f mime_encodings.h

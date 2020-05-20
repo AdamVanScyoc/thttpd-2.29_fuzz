@@ -59,6 +59,7 @@
 #include "mmc.h"
 #include "timers.h"
 #include "match.h"
+#include "thttpd.h"
 
 #ifndef SHUT_WR
 #define SHUT_WR 1
@@ -97,8 +98,8 @@ typedef struct {
     off_t bytes_since_avg;
     int num_sending;
     } throttletab;
-static throttletab* throttles;
-static int numthrottles, maxthrottles;
+throttletab* throttles;
+int numthrottles, maxthrottles;
 
 #define THROTTLE_NOLIMIT -1
 
@@ -151,13 +152,12 @@ static void lookup_hostname( httpd_sockaddr* sa4P, size_t sa4_len, int* gotv4P, 
 static void read_throttlefile( char* tf );
 static void shut_down( void );
 static int handle_newconnect( struct timeval* tvP, int listen_fd );
-static void handle_read( connecttab* c, struct timeval* tvP );
 static void handle_send( connecttab* c, struct timeval* tvP );
 static void handle_linger( connecttab* c, struct timeval* tvP );
-static int check_throttles( connecttab* c );
+int check_throttles( connecttab* c );
 static void clear_throttles( connecttab* c, struct timeval* tvP );
 static void update_throttles( ClientData client_data, struct timeval* nowP );
-static void finish_connection( connecttab* c, struct timeval* tvP );
+void finish_connection( connecttab* c, struct timeval* tvP );
 static void clear_connection( connecttab* c, struct timeval* tvP );
 static void really_clear_connection( connecttab* c, struct timeval* tvP );
 static void idle( ClientData client_data, struct timeval* nowP );
@@ -1573,7 +1573,7 @@ handle_newconnect( struct timeval* tvP, int listen_fd )
     }
 
 
-static void
+void
 handle_read( connecttab* c, struct timeval* tvP )
     {
     int sz;
@@ -1870,7 +1870,7 @@ handle_linger( connecttab* c, struct timeval* tvP )
     }
 
 
-static int
+int
 check_throttles( connecttab* c )
     {
     int tnum;
@@ -1972,7 +1972,7 @@ update_throttles( ClientData client_data, struct timeval* nowP )
     }
 
 
-static void
+void
 finish_connection( connecttab* c, struct timeval* tvP )
     {
     /* If we haven't actually sent the buffered response yet, do so now. */

@@ -48,11 +48,19 @@
 # endif
 #endif
 
+/* The connection states. */
+#define CNST_FREE 0
+#define CNST_READING 1
+#define CNST_SENDING 2
+#define CNST_PAUSING 3
+#define CNST_LINGERING 4
+
 #include "libhttpd.h"
 #include "mmc.h"
 #include "timers.h"
 #include "match.h"
 #include "tdate_parse.h"
+#include "fdwatch.h"
 
 #ifndef STDIN_FILENO
 #define STDIN_FILENO 0
@@ -94,7 +102,50 @@ typedef long long int64_t;
 #define ERROR_FORM(a,b) a
 #endif /* EXPLICIT_ERROR_PAGES */
 
+#define THROTTLE_NOLIMIT -1
+
+typedef struct {
+    int conn_state;
+    int next_free_connect;
+    httpd_conn* hc;
+    int tnums[MAXTHROTTLENUMS];         /* throttle indexes */
+    int numtnums;
+    long max_limit, min_limit;
+    time_t started_at, active_at;
+    Timer* wakeup_timer;
+    Timer* linger_timer;
+    long wouldblock_delay;
+    off_t bytes;
+    off_t end_byte_index;
+    off_t next_byte_index;
+    } connecttab;
+static connecttab* connects;
+
+typedef struct {
+    char* pattern;
+    long max_limit, min_limit;
+    long rate;
+    off_t bytes_since_avg;
+    int num_sending;
+    } throttletab;
+throttletab* throttles;
+int numthrottles, maxthrottles;
+int num_connects, max_connects, first_free_connect;
+int httpd_conn_count;
+int terminate = 0;
+time_t start_time, stats_time;
+long stats_connections;
+off_t stats_bytes;
+int stats_simultaneous;
+
 static size_t sockaddr_len( httpd_sockaddr* saP );
+void handle_read( connecttab* c, struct timeval* tvP );
+int check_throttles( connecttab* c );
+void finish_connection( connecttab* c, struct timeval* tvP );
+void clear_connection( connecttab* c, struct timeval* tvP );
+void linger_clear_connection( ClientData client_data, struct timeval* nowP );
+void really_clear_connection( connecttab* c, struct timeval* tvP );
+void clear_throttles( connecttab* c, struct timeval* tvP );
 
 int main(int argc, char*argv[]) {
 	int port = 8989;
@@ -147,7 +198,6 @@ int main(int argc, char*argv[]) {
     socklen_t sz;
 
 	hc->read_size = 0;
-	//httpd_realloc_str( &hc->read_buf, &hc->read_size, 500 );
 	hc->maxdecodedurl =
 	    hc->maxorigfilename = hc->maxexpnfilename = hc->maxencodings =
 	    hc->maxpathinfo = hc->maxquery = hc->maxaccept =
@@ -221,6 +271,24 @@ int main(int argc, char*argv[]) {
     hc->keep_alive = 0;
     hc->should_linger = 0;
     hc->file_address = (char*) 0;
+
+	struct timeval tv;
+typedef struct {
+    int conn_state;
+    int next_free_connect;
+    httpd_conn* hc;
+    int tnums[MAXTHROTTLENUMS];         /* throttle indexes */
+    int numtnums;
+    long max_limit, min_limit;
+    time_t started_at, active_at;
+    Timer* wakeup_timer;
+    Timer* linger_timer;
+    long wouldblock_delay;
+    off_t bytes;
+    off_t end_byte_index;
+    off_t next_byte_index;
+    } connecttab;
+	connecttab *c;
 //////////////////////////////////////////////////////////
 
 
@@ -251,6 +319,7 @@ int main(int argc, char*argv[]) {
 	}
 	(void) fcntl( fileno( logfp ), F_SETFD, 1 );
 	
+	/*
 	fd = fopen(argv[2], "rb");
 	if (NULL == fd) {
 		printf("Failed to read in test file. strerror: %s\n", strerror(errno));
@@ -260,24 +329,63 @@ int main(int argc, char*argv[]) {
 	lSize = ftell( fd );
 	rewind( fd );
 	//hc->read_buf = calloc(lSize+3, 1);
-	hc->read_buf = calloc(lSize, 1);
+	//read_buf = calloc(lSize, 1);
 	if ( 1 != fread( hc->read_buf, lSize, 1, fd)) {
 		fputs("entire read failed", stderr);
 		return -1;
 	}
-	//lSize += 3L;
-	//hc->read_buf = strcat(hc->read_buf, "\x0d\x0a");
 	hc->read_idx = lSize;
+	*/
+	//hc->conn_fd = fd;
+	httpd_realloc_str( &hc->read_buf, &hc->read_size, 600 );
+	//hc->conn_fd = 0;
+	hc->conn_fd = open(argv[2], 0);
 
-	int rtrn = httpd_parse_request(hc);
+	c = calloc(sizeof(connecttab), 1);
+	c->hc = hc;
+	c->conn_state = 1;
+	c->next_free_connect = -1;
+	c->numtnums = 0;
+	c->max_limit = 0;
+	c->min_limit = 0;
+	c->started_at = 0;
+	// TODO
+	c->active_at = 1588981353;
+	c->wakeup_timer = 0;
+	c->linger_timer = 0;
+	c->wouldblock_delay = 0;
+	c->bytes = 0;
+	c->end_byte_index = 0;
+	c->next_byte_index = 0;
+
+	gettimeofday( &tv, (struct timezone*) 0 );
+	handle_read(c, &tv);
+	/*
+	size_t size = 15;
+	size_t nmemb = 15;
+	char * buf1 = calloc(32, 1);
+	fread(buf1, size, nmemb, stdin);
+	fprintf(stdout, "%s", buf1);
+	*/
+
+	//int rtrn = httpd_parse_request(hc);
+
 
     timer = time(NULL);
     tm_info = localtime(&timer);
 
     strftime(time_buffer, 26, "%H:%M:%S %d-%m-%Y", tm_info);
 
-	fprintf(logfp, "%d \"%s\" \"%s\" \"%s\" \"%s\" %d %s\n", hc->method, hc->read_buf, hc->decodedurl, 
-					hc->protocol, hc->useragent, rtrn, time_buffer);
+	/*
+	printf("%d\n", hc->method);
+	printf("%s\n", hc->decodedurl);
+	printf("%s\n", hc->protocol);
+	printf("%s\n", hc->useragent);
+	printf("%s\n", time_buffer);
+	*/
+	fprintf(logfp, "\"%s\" \"%s\" \"%s\" \"%s\" %s\n",
+		   	httpd_method_str(hc->method), hc->decodedurl, hc->protocol,
+		   	hc->useragent, time_buffer);
 
 	free(hc->hs->server_hostname);
 	free(hc->hs->charset);
@@ -305,9 +413,11 @@ int main(int argc, char*argv[]) {
 	free(hc->read_buf);
 	free(hc);
 
+	free(c);
+
 	free(cwd);
 
-return rtrn;
+return 0;
 }
 
 static size_t
@@ -323,3 +433,263 @@ sockaddr_len( httpd_sockaddr* saP )
 	return 0;	/* shouldn't happen */
 	}
     }
+
+void
+handle_read( connecttab* c, struct timeval* tvP )
+    {
+    int sz;
+    ClientData client_data;
+    httpd_conn* hc = c->hc;
+
+    /* Is there room in our buffer to read more bytes? */
+    if ( hc->read_idx >= hc->read_size )
+	{
+	if ( hc->read_size > 5000 )
+	    {
+	    httpd_send_err( hc, 400, httpd_err400title, "", httpd_err400form, "" );
+	    finish_connection( c, tvP );
+	    return;
+	    }
+	httpd_realloc_str(
+	    &hc->read_buf, &hc->read_size, hc->read_size + 1000 );
+	}
+
+    /* Read some more bytes. */
+    sz = read(
+	hc->conn_fd, &(hc->read_buf[hc->read_idx]),
+	hc->read_size - hc->read_idx );
+    if ( sz == 0 )
+	{
+	httpd_send_err( hc, 400, httpd_err400title, "", httpd_err400form, "" );
+	finish_connection( c, tvP );
+	return;
+	}
+    if ( sz < 0 )
+	{
+	/* Ignore EINTR and EAGAIN.  Also ignore EWOULDBLOCK.  At first glance
+	** you would think that connections returned by fdwatch as readable
+	** should never give an EWOULDBLOCK; however, this apparently can
+	** happen if a packet gets garbled.
+	*/
+	if ( errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK )
+	    return;
+	httpd_send_err(
+	    hc, 400, httpd_err400title, "", httpd_err400form, "" );
+	finish_connection( c, tvP );
+	return;
+	}
+    hc->read_idx += sz;
+    c->active_at = tvP->tv_sec;
+
+    /* Do we have a complete request yet? */
+    switch ( httpd_got_request( hc ) )
+	{
+	case GR_NO_REQUEST:
+	return;
+	case GR_BAD_REQUEST:
+	httpd_send_err( hc, 400, httpd_err400title, "", httpd_err400form, "" );
+	finish_connection( c, tvP );
+	return;
+	}
+
+    /* Yes.  Try parsing and resolving it. */
+    if ( httpd_parse_request( hc ) < 0 )
+	{
+	finish_connection( c, tvP );
+	return;
+	}
+
+    /* Check the throttle table */
+    if ( ! check_throttles( c ) )
+	{
+	httpd_send_err(
+	    hc, 503, httpd_err503title, "", httpd_err503form, hc->encodedurl );
+	finish_connection( c, tvP );
+	return;
+	}
+
+    /* Start the connection going. */
+    if ( httpd_start_request( hc, tvP ) < 0 )
+	{
+	/* Something went wrong.  Close down the connection. */
+	finish_connection( c, tvP );
+	return;
+	}
+
+    /* Fill in end_byte_index. */
+    if ( hc->got_range )
+	{
+	c->next_byte_index = hc->first_byte_index;
+	c->end_byte_index = hc->last_byte_index + 1;
+	}
+    else if ( hc->bytes_to_send < 0 )
+	c->end_byte_index = 0;
+    else
+	c->end_byte_index = hc->bytes_to_send;
+
+    /* Check if it's already handled. */
+    if ( hc->file_address == (char*) 0 )
+	{
+	/* No file address means someone else is handling it. */
+	int tind;
+	for ( tind = 0; tind < c->numtnums; ++tind )
+	    throttles[c->tnums[tind]].bytes_since_avg += hc->bytes_sent;
+	c->next_byte_index = hc->bytes_sent;
+	finish_connection( c, tvP );
+	return;
+	}
+    if ( c->next_byte_index >= c->end_byte_index )
+	{
+	/* There's nothing to send. */
+	finish_connection( c, tvP );
+	return;
+	}
+
+    /* Cool, we have a valid connection and a file to send to it. */
+    c->conn_state = CNST_SENDING;
+    c->started_at = tvP->tv_sec;
+    c->wouldblock_delay = 0;
+    client_data.p = c;
+
+    fdwatch_del_fd( hc->conn_fd );
+    fdwatch_add_fd( hc->conn_fd, c, FDW_WRITE );
+    }
+
+int
+check_throttles( connecttab* c )
+    {
+    int tnum;
+    long l;
+
+    c->numtnums = 0;
+    c->max_limit = c->min_limit = THROTTLE_NOLIMIT;
+    for ( tnum = 0; tnum < numthrottles && c->numtnums < MAXTHROTTLENUMS;
+	  ++tnum )
+	if ( match( throttles[tnum].pattern, c->hc->expnfilename ) )
+	    {
+	    /* If we're way over the limit, don't even start. */
+	    if ( throttles[tnum].rate > throttles[tnum].max_limit * 2 )
+		return 0;
+	    /* Also don't start if we're under the minimum. */
+	    if ( throttles[tnum].rate < throttles[tnum].min_limit )
+		return 0;
+	    if ( throttles[tnum].num_sending < 0 )
+		{
+		syslog( LOG_ERR, "throttle sending count was negative - shouldn't happen!" );
+		throttles[tnum].num_sending = 0;
+		}
+	    c->tnums[c->numtnums++] = tnum;
+	    ++throttles[tnum].num_sending;
+	    l = throttles[tnum].max_limit / throttles[tnum].num_sending;
+	    if ( c->max_limit == THROTTLE_NOLIMIT )
+		c->max_limit = l;
+	    else
+		c->max_limit = MIN( c->max_limit, l );
+	    l = throttles[tnum].min_limit;
+	    if ( c->min_limit == THROTTLE_NOLIMIT )
+		c->min_limit = l;
+	    else
+		c->min_limit = MAX( c->min_limit, l );
+	    }
+    return 1;
+    }
+
+void
+finish_connection( connecttab* c, struct timeval* tvP )
+    {
+    /* If we haven't actually sent the buffered response yet, do so now. */
+    httpd_write_response( c->hc );
+
+    /* And clear. */
+    clear_connection( c, tvP );
+    }
+
+void
+clear_connection( connecttab* c, struct timeval* tvP )
+    {
+    ClientData client_data;
+
+    if ( c->wakeup_timer != (Timer*) 0 )
+	{
+	tmr_cancel( c->wakeup_timer );
+	c->wakeup_timer = 0;
+	}
+
+    /* This is our version of Apache's lingering_close() routine, which is
+    ** their version of the often-broken SO_LINGER socket option.  For why
+    ** this is necessary, see http://www.apache.org/docs/misc/fin_wait_2.html
+    ** What we do is delay the actual closing for a few seconds, while reading
+    ** any bytes that come over the connection.  However, we don't want to do
+    ** this unless it's necessary, because it ties up a connection slot and
+    ** file descriptor which means our maximum connection-handling rate
+    ** is lower.  So, elsewhere we set a flag when we detect the few
+    ** circumstances that make a lingering close necessary.  If the flag
+    ** isn't set we do the real close now.
+    */
+    if ( c->conn_state == CNST_LINGERING )
+	{
+	/* If we were already lingering, shut down for real. */
+	tmr_cancel( c->linger_timer );
+	c->linger_timer = (Timer*) 0;
+	c->hc->should_linger = 0;
+	}
+    if ( c->hc->should_linger )
+	{
+	if ( c->conn_state != CNST_PAUSING )
+	    fdwatch_del_fd( c->hc->conn_fd );
+	c->conn_state = CNST_LINGERING;
+	shutdown( c->hc->conn_fd, SHUT_WR );
+	fdwatch_add_fd( c->hc->conn_fd, c, FDW_READ );
+	client_data.p = c;
+	if ( c->linger_timer != (Timer*) 0 )
+	    syslog( LOG_ERR, "replacing non-null linger_timer!" );
+	c->linger_timer = tmr_create(
+	    tvP, linger_clear_connection, client_data, LINGER_TIME, 0 );
+	if ( c->linger_timer == (Timer*) 0 )
+	    {
+	    syslog( LOG_CRIT, "tmr_create(linger_clear_connection) failed" );
+	    exit( 1 );
+	    }
+	}
+    else
+	really_clear_connection( c, tvP );
+    }
+
+void
+linger_clear_connection( ClientData client_data, struct timeval* nowP )
+    {
+    connecttab* c;
+
+    c = (connecttab*) client_data.p;
+    c->linger_timer = (Timer*) 0;
+    really_clear_connection( c, nowP );
+    }
+
+void
+really_clear_connection( connecttab* c, struct timeval* tvP )
+    {
+    stats_bytes += c->hc->bytes_sent;
+    if ( c->conn_state != CNST_PAUSING )
+	fdwatch_del_fd( c->hc->conn_fd );
+    httpd_close_conn( c->hc, tvP );
+    clear_throttles( c, tvP );
+    if ( c->linger_timer != (Timer*) 0 )
+	{
+	tmr_cancel( c->linger_timer );
+	c->linger_timer = 0;
+	}
+    c->conn_state = CNST_FREE;
+    c->next_free_connect = first_free_connect;
+    first_free_connect = c - connects;	/* division by sizeof is implied */
+    --num_connects;
+    }
+
+void
+clear_throttles( connecttab* c, struct timeval* tvP )
+    {
+    int tind;
+
+    for ( tind = 0; tind < c->numtnums; ++tind )
+	--throttles[c->tnums[tind]].num_sending;
+    }
+
